@@ -1,0 +1,32 @@
+    def get_reward(self, state1, state2):
+        ''''该函数比较两个状态并返回奖励值'''
+        state1 = np.array(state1)
+        state2 = np.array(state2)
+        
+        min_temperature = np.min(state2)
+        
+        if min_temperature<300:   
+            w1 = 0.8
+            w2 = 0.2
+        else:
+            w1 = 0.3
+            w2 = 0.7    
+        '''
+        w1= 0.8
+        w2= 0.2
+        '''
+        state2_var = np.var(state2) #越大越差
+        grad_array = (state2 - state1) / delta_time 
+        grad = abs(np.mean(grad_array) - temperature_grad) #越大越差
+        
+        if math.log(state2_var) > 2 :
+            re1 = -math.log(state2_var) 
+        elif math.log(state2_var)>0 and math.log(state2_var)<=2:
+            re1 = -2 * math.log(state2_var) 
+        else:
+            re= 1
+            
+        re2 = -math.log(grad) 
+        re = w1 * re1 + w2 * re2   
+        #print("re1: {} re2:{} reward:{} min_temperature:{} \n".format(re1,re2,re,min_temperature))
+        return re

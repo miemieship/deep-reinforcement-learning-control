@@ -1,0 +1,54 @@
+    def get_reward(self, state1, state2,count=[0],xs = [0, 0],ys = [1, 1]):
+        '''
+        count=[0],xs = [0, 0],ys = [1, 1]是函数的默认参数。用于画动态折线图。
+        这里利用了python函数默认参数的值只在定义时计算一次，即“调用过函数后，值不释放”
+        因此count可以保存调用函数的次数，xs保存着下一个线段的x坐标，ys保存着下一个线段的y坐标
+        动态曲线作图原理见下面的注释。
+        '''
+        count[0]=1 + count[0]
+        
+        state1 = np.array(state1)
+        state2 = np.array(state2)
+        
+        grad_array = (state2 - state1) / delta_time#实际温升速度 
+        temperature_grad = 5 #理想温升速度
+        grad = abs(np.var(grad_array - temperature_grad)) #越大越差
+        
+        '''reward函数有两点要求：
+        1.grad值越小reward越大，不能出现任何一个grad值变小但reward增大的情况。
+          reward函数单调连续即可保证这一点。
+        2.随着grad减小，reward应该变化的越来越剧烈。
+        因为我选择了线性变化，如果斜率不变，grad越小，它对reward的影响越小，所以需要在grad减小时逐渐增大斜率。
+        这可以让reward更快的接近满分。（我猜的）
+        '''
+        if grad >= 75 :
+            re = - grad
+        elif grad>= 50:
+            re= -2*grad +75
+        elif grad>= 25:
+            re= -3*grad +125
+        elif grad>= 15:
+            re= -4*grad +150
+        elif grad>= 8:
+            re= -6*grad +180
+        elif grad>= 4:
+            re= -8*grad +196
+        else:
+            re= -12*grad +211   
+            
+        print("\n\n****************count:{}******************\n".format(count[0]))
+        print("re: {} grad:{} \n".format(re,grad))
+        
+        #画出实时的reward折线图，横坐标为训练次数（即：get_reward函数的调用次数）
+        #基本原理是使用一个长度为2的数组xs，ys，每次替换数据并在原始图像后追加。
+        plt.axis([0, 500, -200, 230])
+        plt.ion()
+        y = re
+        xs[0] = xs[1]
+        ys[0] = ys[1]
+        xs[1] = count[0]
+        ys[1] = y
+        plt.plot(xs, ys)
+        plt.pause(0.1)
+        
+        return re
