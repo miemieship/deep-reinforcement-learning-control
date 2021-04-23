@@ -1,0 +1,764 @@
+//三维的程序，时间步长1s
+#include<iostream>
+#include<cmath>
+#include<iomanip>
+#include<fstream>
+using namespace std;
+int main()
+{
+	ifstream fin("DATA.txt",ios::in);
+	ofstream transist1,transist2;
+	transist1.open("transist1.txt",ios::trunc||ios::out);//中间一圈
+	transist2.open("transist2.txt",ios::trunc||ios::out);//中间一点（平均值）
+	if(!fin||!transist1||!transist2)
+	{
+		cout<<"can not read the file"<<endl;
+		return 1; 
+	}
+	transist1<<"每一时刻的 中间一圈每一点 瞬态温度（℃）"<<endl;
+	transist2<<"每一时刻的 中间一圈每一点 瞬态温度的平均值（℃）"<<endl;
+
+	const int row=200,column=600,radius=5;//轴向、周向、径向
+	const double hight=155.0,R_engine=80.0,thickness=3.0;//轴向、周向、径向
+	const int time_num=80,freq=1;//频率，时间步长1s,总时间=time_num/freq=80s,dt=1/freq
+	const double P=150.0;//总功率
+	const int num_seed=1e9;
+	const double t0=20.0;//环境温度
+	const double tf=20.0;//流体温度
+	const double pi=3.14159;
+	const double absorption_rate=0.9;
+	const double lambda=0.6,cp=1400.0,rho=1750.0;//壳体物性参数J/(kgK) kg/m3
+	double q_out(double t,double l);//表面对外散热换热系数,t:local温度，l:local高度
+	double q_c(double t,double l);//表面对外自然对流换热系数,t:local温度，l:local高度
+
+	//输入蒙特卡洛法结果，参数需修改
+	static double q_tmp[600][1800],q_in[row+1][column];
+	double p=P/num_seed;
+	for(int m=0;m<1800;m++)
+	{
+		for(int n=0;n<600;n++)
+		{
+			fin>>q_tmp[n][m];
+		}
+	}
+	fin.close();
+
+	//每个网格上的热流量W
+	for(int m=0;m<column;m++)//将网格变疏
+	{
+		for(int n=0;n<row;n++)//将3个格子求平均, [W]
+			q_in[n][m]=(q_tmp[3*n][3*m]+q_tmp[3*n+1][3*m+1]+q_tmp[3*n+2][3*m+2])/3*p*9*absorption_rate;
+
+		q_in[row][m]=q_in[row-1][m]/2;//面积缩小一半
+		q_in[0][m]=q_in[0][m]/2;
+	}
+	
+	//网格尺寸参数,m，采用均匀网格
+	double dz=hight/row*0.001;
+	double dphi=2*pi/column;//rad
+	double dr=thickness/radius*0.001;
+	
+	//初始化3D温度场
+	static float T[radius+3][column+2][row+3];//r,phi,z->i,j,k
+	static float U[radius+3][column+2][row+3];
+	static float V[radius+3][column+2][row+3];
+	static float T1[radius+3][column+2][row+3];
+	for(int n=0;n<radius+3;n++)
+	{
+		for(int j=0;j<column+2;j++)
+		{
+			for(int k=0;k<row+3;k++)
+			{
+				T[n][j][k]=tf;
+				U[n][j][k]=tf;
+				V[n][j][k]=tf;
+				T1[n][j][k]=tf;
+			}
+		}
+	}
+	for(int i=1;i<radius+2;i++)//壳体上的点
+		for(int j=1;j<column+2;j++)
+			for(int k=1;k<row+2;k++)
+				T[i][j][k]=t0;
+			
+	//系数，均与rn,rs,rp有关（除了边界）
+	double Awe=dr*dz*lambda/dphi;//还没有除以(/)re或rw！！
+	double Ans=dphi*dz*lambda/dr;//还没有乘以(*)rn或rs！！
+	double Abd=dr*dphi*lambda/dz*0.5;//还没有乘以(*)(rn+rs)！！
+	double DeltaV=dr*dphi*dz;//还没有乘以(*)(rn+rs)/2！！
+	double Ap0=rho*cp*DeltaV*freq*2.0;//还没有乘以(*)(rn+rs)/2！！  !/(delta_t/2)!brian ADI
+	double deltaS_ns=dz*dphi*R_engine*0.001;//竖直微元面积，法向为ns
+	double rp[radius+1];
+	for(int i=0;i<=radius;i++)
+		rp[i]=R_engine*0.001-i*dr;
+
+	//ns方向系数随半径变化的值
+	double an[radius+1],as[radius+1],c_ns[radius+1];//r,radius+1,ns
+	for(int i=0;i<=radius;i++)
+	{
+		an[i]=Ans*(rp[i]+dr/2);
+		as[i]=Ans*(rp[i]-dr/2);
+	}
+	an[0]=0; as[radius]=0;
+
+	//we方向系数随半径变化的值
+	double a_we[radius+1], c_we[column];
+	for(int i=0;i<=radius;i++)
+		a_we[i]=Awe/rp[i];//re=rw=rp
+	a_we[0]=a_we[0]/2;
+	a_we[radius]=a_we[radius]/2;
+
+	//bd方向系数随半径变化的值
+	double a_bd[radius+1], c_bd[row+1];
+	for(int i=0;i<=radius;i++)
+		a_bd[i]=Abd*2*rp[i];//rn+rs=2rp
+	a_bd[0]=a_bd[0]/2;
+	a_bd[radius]=a_bd[radius]/2;
+
+	//非稳态项系数ap0随半径变化的值
+	double ap0[radius+1];//ap=ap0+an+as（ap0+该方向另外两个）
+	for(int i=0;i<=radius;i++)
+		ap0[i]=Ap0*rp[i];//rn+rs=2rp
+	ap0[0]=ap0[0]/2;
+	ap0[radius]=ap0[radius]/2;
+
+	double TDMA_P_ns[radius+2],TDMA_Q_ns[radius+2];//TDMA计算系数
+	for(int i=0;i<radius+2;i++){
+		TDMA_P_ns[i]=0;
+		TDMA_Q_ns[i]=0;}
+	double TDMA_P_we[column+1],TDMA_Q_we[column+1];
+	for(int j=0;j<=column;j++){
+		TDMA_P_we[j]=0;
+		TDMA_Q_we[j]=0;}
+	double TDMA_P_bd[row+2],TDMA_Q_bd[row+2];
+	for(int k=0;k<row+2;k++){
+		TDMA_P_bd[k]=0;
+		TDMA_Q_bd[k]=0;}
+
+	double an_tmp,as_tmp,ap0_tmp,awe_tmp,ab_tmp,ad_tmp,deltaS_ns_tmp;
+	double T_sum1=0,T_sum2=0;//瞬态温度变化
+
+	//计算温度场
+	//for(int time_tmp=0;time_tmp<10;time_tmp++)
+	for(int time_tmp=0;time_tmp<time_num;time_tmp++)
+	{
+
+		//一、ADI--r方向使用TDMA隐式求解
+		for(int k=0;k<=row;k++)//bd
+		{
+			for(int j=0;j<column;j++)//we
+			{
+				for(int i=0;i<=radius;i++)//r,radius+1
+				{
+					//边界系数的处理					
+					an_tmp=an[i];
+					as_tmp=as[i];
+					ap0_tmp=ap0[i];
+					awe_tmp=a_we[i];
+					ab_tmp=a_bd[i];
+					ad_tmp=a_bd[i];
+					deltaS_ns_tmp=deltaS_ns;
+					if(k==0||k==row)//上下边界,dz/2
+					{
+						an_tmp=an_tmp/2;
+						as_tmp=as_tmp/2;						
+						ap0_tmp=ap0_tmp/2;
+						deltaS_ns_tmp=deltaS_ns/2;
+						awe_tmp=awe_tmp/2;
+					}
+					/*if(k==0)    ad_tmp=0;
+					if(k==row)  ab_tmp=0;*/
+
+					double ap=ap0_tmp+an_tmp+as_tmp;
+										
+					i++;j++;k++; //i=1~6,j=1~600,k=1~201
+					if(i==1)//边界节点，对流和辐射项
+						c_ns[i-1]=awe_tmp*(T[i][j-1][k]+T[i][j+1][k]-2*T[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k]
+							+q_in[k-1][j-1]-q_out(T[1][j][k],k*dz)*deltaS_ns_tmp;	// [W]
+					else if(i==radius+1)//边界节点，对流项
+						c_ns[i-1]=awe_tmp*(T[i][j-1][k]+T[i][j+1][k]-2*T[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k]
+							-q_c(T[radius+1][j][k],k*dz)*deltaS_ns_tmp;	// [W]
+					else
+						c_ns[i-1]=awe_tmp*(T[i][j-1][k]+T[i][j+1][k]-2*T[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k];
+					i--;j--;k--;
+					
+					//P,Q从1开始，对应的as,an,c_ns从0开始,i=0~25
+					double tmp=(ap-an_tmp*TDMA_P_ns[i]);
+					TDMA_P_ns[i+1]=as_tmp/tmp;
+					TDMA_Q_ns[i+1]=(c_ns[i]+an_tmp*TDMA_Q_ns[i])/tmp;
+					//if(k==0||k==row)//上下边界，系数还原
+					//{
+					//	deltaS_ns=deltaS_ns*2;}
+				}//i括号
+
+				j++;k++;//j:1~600,k:1~501
+				//实体节点温度i=26~1
+				U[radius+1][j][k]=TDMA_Q_ns[radius+1];
+				//cout<<TDMA_Q[radius+1]<<endl;
+				for(int i=radius+1;i>1;i--)
+				{
+					U[i-1][j][k]=TDMA_Q_ns[i-1]+TDMA_P_ns[i-1]*U[i][j][k];
+
+					if(_isnan(U[i-1][j][k])||U[i-1][j][k]>1000)  //(5,2,1)有问题,(5,4,1)1380℃
+					{
+						cout<<"ns;time:"<<time_tmp<<endl;
+						cout<<i-1<<","<<j<<","<<k<<endl;
+						cout<<U[i-1][j][k]<<endl;
+						return 0;
+					}
+				}
+
+				//径向虚拟节点温度
+				U[0][j][k]=U[1][j][k];
+				U[radius+2][j][k]=U[radius+1][j][k];
+				j--;k--;
+			}//j括号
+
+			//周向虚拟节点温度
+			k++;//k:1~501
+			for(int i=0;i<radius+3;i++)
+			{
+				U[i][column+1][k]=U[i][1][k];
+				U[i][0][k]=U[i][600][k];
+			}
+			k--;
+		}//k括号
+
+		//轴向虚拟节点温度（上下底面）
+		for(int i=0;i<radius+3;i++)
+			for(int j=0;j<column+2;j++)
+			{
+				U[i][j][0]=U[i][j][1];
+				U[i][j][row+2]=U[i][j][row+1];
+			}
+						
+	//* ------------------------------------------------------------------ */
+		//二、ADI--phi方向使用TDMA隐式求解
+		for(int k=0;k<=row;k++)//bd,501
+		{
+			for(int i=0;i<=radius;i++)//ns,26
+			{
+				awe_tmp=a_we[i];
+				an_tmp=an[i];
+				as_tmp=as[i];
+				ap0_tmp=ap0[i];
+				ab_tmp=a_bd[i];
+				ad_tmp=a_bd[i];
+				deltaS_ns_tmp=deltaS_ns;
+				if(k==0||k==row)//上下边界,dz/2
+				{
+					an_tmp=an[i]/2;
+					as_tmp=as[i]/2;
+					ap0_tmp=ap0[i]/2;
+					deltaS_ns_tmp=deltaS_ns/2;
+					awe_tmp=a_we[i]/2;
+				}
+				if(k==0)    ad_tmp=0;
+				if(k==row)  ab_tmp=0;
+
+				for(int j=0;j<column;j++)//we,600
+				{		
+					double ap=ap0_tmp+awe_tmp+awe_tmp;
+					
+					i++;j++;k++; //i=1~26,j=1~600,k=1~501
+					if(i==1)//边界节点，对流和辐射项
+						c_we[j-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k]
+							+q_in[k-1][j-1]-q_out(T[1][j][k],k*dz)*deltaS_ns_tmp;// T !!
+					else if(i==radius+1)//边界节点，对流项
+						c_we[j-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k]
+							-q_c(T[radius+1][j][k],k*dz)*deltaS_ns_tmp;	// [W]
+					else//内部节点
+						c_we[j-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+ad_tmp*(T[i][j][k-1]
+							-T[i][j][k])+ab_tmp*(T[i][j][k+1]-T[i][j][k])+ap0_tmp*T[i][j][k];
+					i--;j--;k--;
+
+					//P,Q从1开始，对应的c_ns从0开始,j=0~599
+					double tmp=(ap-awe_tmp*TDMA_P_we[j]);
+					TDMA_P_we[j+1]=awe_tmp/tmp;
+					TDMA_Q_we[j+1]=(c_we[j]+awe_tmp*TDMA_Q_we[j])/tmp;
+				}//j括号
+
+				//上下边界，系数还原
+				if(k==0||k==row)
+				{
+					awe_tmp=a_we[i];
+					an_tmp=an[i];
+					as_tmp=as[i];
+					ap0_tmp=ap0[i];
+					ab_tmp=a_bd[i];
+					ad_tmp=a_bd[i];
+					deltaS_ns_tmp=deltaS_ns;
+				}
+
+				i++;k++;//i:1~26,k:1~201
+				//实体节点温度j=600~1
+				V[i][column][k]=TDMA_Q_we[column];
+				for(int j=column;j>1;j--)
+				{
+					V[i][j-1][k]=TDMA_Q_we[j-1]+TDMA_P_we[j-1]*V[i][j][k];
+					if(_isnan(V[i][j-1][k])||V[i][j-1][k]>1000)
+					{
+						cout<<"we;time:"<<time_tmp<<endl;
+						cout<<i<<","<<j-1<<","<<k<<endl;
+						cout<<V[i][j-1][k]<<endl;
+						return 0;
+					}
+				}
+				
+				//周向虚拟节点温度
+				V[i][0][k]=V[i][column][k];
+				V[i][column+1][k]=V[i][1][k];
+				i--;k--;
+			}//i括号
+
+			//径向虚拟节点温度
+			k++;//k:1~501
+			for(int j=0;j<column+2;j++)
+			{
+				V[0][j][k]=V[1][j][k];
+				V[radius+2][j][k]=V[radius+1][j][k];
+			}
+			k--;
+		}//k括号
+
+		//轴向虚拟节点温度（上下底面）
+		for(int i=0;i<radius+3;i++)
+			for(int j=0;j<column+2;j++)
+			{
+				V[i][j][0]=V[i][j][1];
+				V[i][j][row+2]=V[i][j][row+1];
+			}
+
+	/* ------------------------------------------------------------------ */
+		//三、ADI--z方向使用TDMA隐式求解
+		for(int i=0;i<=radius;i++)//ns
+		{
+			awe_tmp=a_we[i];
+			an_tmp=an[i];
+			as_tmp=as[i];
+			ap0_tmp=ap0[i];
+			ab_tmp=a_bd[i];
+			ad_tmp=a_bd[i];
+			deltaS_ns_tmp=deltaS_ns;
+			for(int j=0;j<column;j++)//we
+			{
+				for(int k=0;k<=row;k++)//bd
+				{
+					if(k==0||k==row)//上下边界,dz/2
+					{
+						an_tmp=an_tmp/2;
+						as_tmp=as_tmp/2;						
+						ap0_tmp=ap0_tmp/2;
+						deltaS_ns_tmp=deltaS_ns/2;
+						awe_tmp=awe_tmp/2;
+					}
+					if(k==0)    ad_tmp=0;
+					if(k==row)  ab_tmp=0;
+
+					double ap=ap0_tmp+ab_tmp+ad_tmp;
+					
+					i++;j++;k++; //i=1~26,j=1~600,k=1~201
+					if(i==1)//边界节点，对流和辐射项
+						c_bd[k-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+awe_tmp*(V[i][j-1][k]
+							-V[i][j][k])+awe_tmp*(V[i][j+1][k]-V[i][j][k])+ap0_tmp*V[i][j][k]
+							+q_in[k-1][j-1]-q_out(V[1][j][k],k*dz)*deltaS_ns_tmp;
+					else if(i==radius+1)//边界节点，对流项
+						c_bd[k-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+awe_tmp*(V[i][j-1][k]
+							-V[i][j][k])+awe_tmp*(V[i][j+1][k]-V[i][j][k])+ap0_tmp*V[i][j][k]
+							-q_c(V[radius+1][j][k],k*dz)*deltaS_ns_tmp;
+					else//内部节点
+						c_bd[k-1]=an_tmp*(U[i-1][j][k]-U[i][j][k])+as_tmp*(U[i+1][j][k]-U[i][j][k])+awe_tmp*(V[i][j-1][k]
+							-V[i][j][k])+awe_tmp*(V[i][j+1][k]-V[i][j][k])+ap0_tmp*V[i][j][k];
+					i--;j--;k--;
+
+					//P,Q从1开始，对应的as,an,c_ns从0开始,k=0~500
+					double tmp=(ap-ad_tmp*TDMA_P_bd[k]);
+					TDMA_P_bd[k+1]=ab_tmp/tmp;
+					TDMA_Q_bd[k+1]=(c_bd[k]+ad_tmp*TDMA_Q_bd[k])/tmp;
+
+					if(k==0||k==row)//上下边界，系数还原
+					{
+						awe_tmp=a_we[i];
+						an_tmp=an[i];
+						as_tmp=as[i];
+						ap0_tmp=ap0[i];
+						ab_tmp=a_bd[i];
+						ad_tmp=a_bd[i];
+						deltaS_ns_tmp=deltaS_ns;
+					}
+				}//k括号
+
+				i++;j++;//i:1~26,j:1~600
+				//实体节点温度k=501~1
+				T[i][j][row+1]=TDMA_Q_bd[row+1];
+				for(int k=row+1;k>1;k--)
+				{
+					T[i][j][k-1]=TDMA_Q_bd[k-1]+TDMA_P_bd[k-1]*T[i][j][k];
+
+					if(_isnan(T[i][j][k-1])||T[i][j][k-1]>1000)//  (6,1,200)有问题,原因：V[6][j][k]<20,用q_c()计算时出错
+											//   解决办法：改V用U计算q_c
+					{
+						cout<<"bd;time:"<<time_tmp<<endl;
+						cout<<i<<","<<j<<","<<k-1<<endl;
+						cout<<T[i][j][k-1]<<endl;
+						return 0;
+					}
+				}
+				
+				//轴向虚拟节点温度
+				T[i][j][0]=T[i][j][1];
+				T[i][j][row+2]=T[i][j][row+1];
+				i--;j--;
+			}//j括号
+
+			//周向虚拟节点温度
+			i++;//i:1~26
+			for(int k=0;k<row+3;k++)//k:503
+			{
+				T[i][0][k]=T[i][column][k];
+				T[i][column+1][k]=T[i][1][k];
+			}
+			i--;
+		}//i括号
+
+		//径向虚拟节点温度（外表面）
+		for(int j=0;j<column+2;j++)
+			for(int k=0;k<row+3;k++)
+			{
+				V[0][j][k]=V[1][j][k];
+				V[radius+2][j][k]=V[radius+1][j][k];
+			}
+	/* ------------------------------------------------------------------ */
+
+		//输出：瞬态温度，中间一圈,transist1.txt
+		int middle;
+		middle=int(row/2);
+		transist1<<time_tmp<<endl;
+		for(int j=1;j<=column;j++)
+		{
+			
+			transist1<<fixed<<setprecision(2)<<T[1][j][middle]<<"  "; 
+			T_sum1+=T[1][j][middle];
+		}
+		transist1<<endl<<"deltaT = "<<(T_sum1-T_sum2)/column<<endl<<endl;
+		T_sum2=T_sum1;
+
+		//输出：一点的瞬态温度，中间一圈的平均值,transist2.txt
+		transist2<<time_tmp<<"s: "<<fixed<<setprecision(2)<<T_sum1/column<<endl;
+		T_sum1=0;
+	}//time的总括号
+
+//-------------------------输出结果-------------------------
+	ofstream surface_data,pure_data;
+	surface_data.open("surfacee tempureture distribution.txt",ios::trunc||ios::out);
+	pure_data.open("surface pure data.txt",ios::trunc||ios::out);
+	if(!surface_data||!pure_data)
+	{
+		cout<<"can not read the file"<<endl;
+		return 1; 
+	}
+
+	//输出：表面完整温度场
+	for(int k=row+1;k>0;k--)//bd
+	{
+		surface_data<<k<<endl;
+		for(int j=1;j<=column;j++)//we
+		{
+			surface_data<<fixed<<setprecision(2)<<T[1][j][k]<<" ";
+			pure_data<<fixed<<setprecision(2)<<T[1][j][k]<<" ";
+		}
+		surface_data<<endl<<endl;
+		pure_data<<endl;
+	}
+
+	surface_data.close();
+	pure_data.close();
+	transist1.close();
+	transist2.close();
+	cout<<"finish"<<endl;
+	cout<< "\nThe run time is:" << (double)clock() /CLOCKS_PER_SEC<< "s" << endl;
+	system("pause");
+	return 0;
+}
+
+double q_out(double t,double l)  //散热(辐射+对流)热流密度( >0 )
+{
+	double q_r=0;
+	double q_c=0;
+	double q_total=0;
+	//double h_r,h_total;
+	double h_c;
+	const int t0=20;//环境温度和流体温度
+	const double g=9.8;
+	const double SIGMA_epsilon=4.536e-8;//SIGMA=0.8,epsilon=5.67e-8
+	//const double epsilon=0.8;
+	q_r=SIGMA_epsilon*pow((273+t),4)-334.3055;//环境t0^4已经计算好
+	//h_r=(SIGMA_epsilon*pow((273+t),4)-334.3055)/(t-t0);//环境t0^4已经计算好
+
+	if(t>=t0)
+	{
+		double Gr,Ra,Nu,v,Pr,lambda_air,a;
+		v=(8e-5*t*t+0.0938*t+13.061)*1e-6;
+		Pr=3e-7*t*t-0.0002*t+0.7059;
+		lambda_air=3e-8*t*t+8e-5*t+0.0242;
+		Gr=g*(t-t0)*l*l*l/v/v/(t+273)/1e9;
+		Ra=Gr*Pr;
+		a=(sqrt(Pr)*2+1+2*Pr)*5/2/Pr;
+		a=1/a;
+		Nu=pow(a,0.25)*pow(Ra,0.25)*3/4;
+		h_c=Nu*lambda_air/l*1000;
+		q_c=h_c*(t-t0);
+	}
+	else
+		q_c=0;
+	q_total=q_c+q_r;
+	//h_total=h_c+h_r;
+	return q_total;
+}
+double q_c(double t,double l)  //自然对流散热，热流密度( >0 )
+{
+	double q_c;
+	double h_c;
+	const int t0=20;//环境温度和流体温度
+	const double g=9.8;
+	if(t>=t0)
+	{
+		double Gr,Ra,Nu,v,Pr,lambda_air,a;
+		v=(8e-5*t*t+0.0938*t+13.061)*1e-6;
+		Pr=3e-7*t*t-0.0002*t+0.7059;
+		lambda_air=3e-8*t*t+8e-5*t+0.0242;
+		Gr=g*(t-t0)*l*l*l/v/v/(t+273)/1e9;
+		Ra=Gr*Pr;
+		a=(sqrt(Pr)*2+1+2*Pr)*5/2/Pr;
+		a=1/a;
+		Nu=pow(a,0.25)*pow(Ra,0.25)*3/4;
+		h_c=Nu*lambda_air/l*1000;
+		q_c=h_c*(t-t0);
+	}
+	else
+		return 0;
+
+	return q_c;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//二维的程序，时间步长0.01s
+#include<iostream>
+#include<cmath>
+#include<iomanip>
+#include<fstream>
+using namespace std;
+int main()
+{
+	ifstream fin("DATA.txt",ios::in);
+	ofstream fout1,fout2,fout_pure,fout_dtw;
+	fout1.open("result.txt",ios::trunc||ios::out);
+	fout2.open("test.txt",ios::trunc||ios::out);
+	fout_pure.open("pure T data.txt",ios::trunc||ios::out);
+	fout_dtw.open("transient wall temperature.txt",ios::trunc||ios::out);
+	if(!fin||!fout1||!fout2||!fout_pure||!fout_dtw)
+	{
+		cout<<"can not read the file"<<endl;
+		return 1; 
+	}
+	//基本参数
+	const int row=600,column=1800,radius=15;
+	const int time_num=10000,freq=100;//频率，时间步长0.01s,time=time_num/freq=80s
+	const double R_engine=80,thickness=3,hight=155;
+	const double pi=3.14159;
+
+	const double P=150;//总功率
+
+	const double t0=20;//环境温度
+	const double absorption_rate=0.9;
+	const int num_seed=1e9;
+	//物性参数
+	const double lambda1=0.6,cp1=1400,rho1=1750;//涂层 J/(kgK) kg/m3
+	const double lambda2=0.6,cp2=1200,rho2=1750;//碳纤维复合材料 J/(kgK) kg/m3
+	double rho_cp1=rho1*cp1;
+	double rho_cp2=rho2*cp2;
+	double rho_cp_ave=(rho1*cp1+rho2*cp2)/2;//a=lambda/rho/cp
+	
+	double q_out(double t,double l);
+	static int A[row][column];//输入蒙特卡洛法结果
+	for(int j=0;j<column;j++)
+	{
+		for(int i=0;i<row;i++)
+		{
+			fin>>A[i][j];//先输入1000
+		}
+	}
+	
+	//输入的辐射热流密度
+	double dz=hight/row/1000;//z轴(高度)方向上网格长度，155/620=0.25mm
+	double dy=thickness/radius/1000;//y轴(厚度)方向上网格长度，3/15=0.2mm
+	double dy2=dy*dy,dz2=dz*dz;
+	double p=P/num_seed;
+	double q_in[row];
+	double ds=pi*2*R_engine*hight/row/column/1000/1000;
+	int sum=0;
+	for(int i=0;i<row;i++)//对每行1800个元素求平均，以平均数进行模拟
+	{
+		for(int j=0;j<column;j++)
+			sum+=A[i][j];
+		q_in[i]=absorption_rate*sum/column*p/ds;//每个网格上的热流密度W/m2
+		sum=0;
+	}
+	double q_upper=q_in[row-1]*0,q_lower=q_in[0]*0;
+
+	//计算温度场
+	static double T[radius+1][row+1],T1[radius+1][row+1];//温度场竖直0.25mm(260/1040)，径向0.1mm(10/100)
+	for(int i=0;i<=radius;i++)//Temperature field initialization
+	{
+		for(int j=0;j<=row;j++)
+		{
+			T[i][j]=t0;//t时刻
+			T1[i][j]=t0;//t+1时刻
+		}
+	}
+	double T_time[time_num];
+
+	for(int time_tmp=0;time_tmp<time_num;time_tmp++)
+	{
+		//1(i,j)=(0,0)
+		T1[0][0]=(lambda1*((T[0][1]-T[0][0])/dz2+(T[1][0]-T[0][0])/dy2)
+				+((q_in[0]-q_out(T[0][0],dy))/dy+q_lower/dz))*2/rho_cp1/freq+T[0][0];
+
+		//3i=0,j=1~1039
+		for(int j=1;j<row;j++)
+			T1[0][j]=(2*lambda1*((T[1][j]-T[0][j])/dy2+(T[0][j+1]+T[0][j-1]-2*T[0][j])/2/dz2)
+					+((q_in[j-1]+q_in[j])-q_out(T[0][j],j*dy))/2/dy)/rho_cp1/freq+T[0][j];
+		
+		T_time[time_tmp]=T1[0][row/2];
+
+		//2(i,j)=(0,1040)
+		T1[0][row]=(lambda1*((T[0][row-1]-T[0][row])/dz2+(T[1][row]-T[0][row])/dy2)
+				+((q_in[row-1]-q_out(T[0][row],hight))/dy+q_upper/dz))*2/rho_cp1/freq+T[0][row];
+
+		//4(i,j)=(1,0)
+		T1[1][0]=(lambda1*(T[0][0]-T[1][0])/dy2+lambda2*(T[2][0]-T[1][0])/dy2
+				+(lambda1+lambda2)*(T[1][1]-T[1][0])/dz2+2*q_lower/dz)/rho_cp_ave/freq+T[1][0];
+		
+		//6i=1,j=1~1039
+		for(int j=1;j<row;j++)
+			T1[1][j]=(lambda1*(T[0][j]-T[1][j])/dy2+lambda2*(T[2][j]-T[1][j])/dy2
+					+(lambda1+lambda2)/2*(T[1][j+1]+T[1][j-1]-2*T[1][j])/dz2)/rho_cp_ave/freq+T[1][j];
+
+		//5(i,j)=(1,1040)
+		T1[1][row]=(lambda1*(T[0][row]-T[1][row])/dy2+lambda2*(T[2][row]-T[1][row])/dy2
+				+(lambda1+lambda2)*(T[1][row-1]-T[1][row])/dz2+2*q_upper/dz)/rho_cp_ave/freq+T[1][row];
+
+		//7i=2~99,j=0
+		for(int i=2;i<radius;i++)
+			T1[i][0]=(lambda2*((T[i-1][0]-2*T[i][0]+T[i+1][0])/dy2+(T[i][1]-T[i][0])/dz2)
+					+2*q_lower/dz)/freq/rho_cp2+T[i][0];
+		
+		//9内节点i=2~99,j=1~1039
+		for(int i=2;i<radius;i++)
+			for(int j=1;j<row;j++)
+				T1[i][j]=lambda2*((T[i+1][j]+T[i-1][j]-2*T[i][j])/dy2+(T[i][j+1]+T[i][j-1]-2*T[i][j])/dz2)
+						/rho_cp2/freq+T[i][j];
+
+		//8i=2~99,j=1040
+		for(int i=2;i<radius;i++)
+			T1[i][row]=(lambda2*((T[i-1][row]-2*T[i][row]+T[i+1][row])/dy2+(T[i][row-1]-T[i][row])/dz2)
+					+2*q_upper/dz)/rho_cp2/freq+T[i][row];
+
+		//10(i,j)=(100,0)
+		T1[radius][0]=2*(lambda2*((T[radius-1][0]-T[radius][0])/dy2+(T[radius][1]-T[radius][0])/dz2)
+					+q_lower/dz)/rho_cp2/freq+T[radius][0];
+
+		//12i=100,j=1~1039
+		for(int j=1;j<row;j++)
+			T1[radius][j]=lambda2*(2*(T[radius-1][j]-T[radius][j])/dy2+(T[radius][j-1]-2*T[radius][j]
+						+T[radius][j+1])/dz2)/rho_cp2/freq+T[radius][j];
+		//11(i,j)=(100,1040)
+		T1[radius][row]=2*(lambda2*((T[radius-1][row]-T[radius][row])/dy2+(T[radius][row-1]-T[radius][row])/dz2)
+					+q_upper/dz)/rho_cp2/freq+T[radius][row];
+
+		//将时间推移一个time_space
+		for(int i=0;i<=radius;i++)
+			for(int j=0;j<=row;j++)
+				T[i][j]=T1[i][j];
+	}
+
+	for(int j=row;j>=0;j--)//输出
+	{
+		fout1<<j<<endl;
+		for(int i=0;i<=radius;i++)
+		{
+			fout1<<fixed<<setprecision(2)<<T1[i][j]<<" ";
+			fout_pure<<fixed<<setprecision(2)<<T1[i][j]<<" ";
+		}
+		fout1<<endl<<endl;//result.txt
+		fout_pure<<endl;  //pure T data.txt
+	}
+
+	for(int i=0;i<time_num;i++)//test.txt
+	{
+		//fout2<<q_in[i]<<endl;  //i<row
+		fout2<<T_time[i]<<" ";
+	}
+
+	for(int i=0;i<time_num;i+=10)//transient wall temperature.txt
+	{
+		fout_dtw<<T_time[i]<<" ";//每10倍时间步长输出一次壁温，0.1s
+		if(i%100==0&&i!=0)
+		{
+			fout_dtw<<endl<<i/100<<"\t";
+			fout_dtw<<T_time[i]-T_time[i-90]<<endl;
+		}
+	}
+
+	fin.close();
+	fout1.close();//result
+	fout2.close();//test
+	fout_pure.close();//温度
+	fout_dtw.close();//瞬态壁面温度
+	cout<< "\nThe run time is:" << (double)clock() /CLOCKS_PER_SEC<< "s" << endl;
+	system("pause");
+	return 0;
+}
+double q_out(double t,double l)
+{
+	double q_r;
+	double q_c;
+	double q_total;
+	const int t0=20;
+	const double g=9.8;
+	const double SIGMA_epsilon=4.536e-8;//SIGMA=0.8,epsilon=5.67e-8
+	//const double epsilon=0.8;
+	q_r=SIGMA_epsilon*pow((273+t),4)-334.3055;//环境t0^4已经计算好
+	double h,Gr,Ra,Nu,v,Pr,lambda,a;
+
+	v=(8e-5*t*t+0.0938*t+13.061)*1e-6;
+	Pr=3e-7*t*t-0.0002*t+0.7059;
+	lambda=3e-8*t*t+8e-5*t+0.0242;
+	Gr=g*(t-t0)*l*l*l/v/v/(t+273)/1e9;
+	Ra=Gr*Pr;
+	a=(sqrt(Pr)*2+1+2*Pr)*5/2/Pr;
+	a=1/a;
+	Nu=pow(a,0.25)*pow(Ra,0.25)*3/4;
+	h=Nu*lambda/l*1000;
+	q_c=h*(t-t0);
+	q_total=q_c+q_r;
+	return q_total;
+}
